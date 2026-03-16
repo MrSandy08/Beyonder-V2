@@ -401,84 +401,91 @@ async function isExplicitOrGore(buffer) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// BLOQUE IA — Ollama / cerebro de Beyonder
-// (anteriormente ia.js)
+// BLOQUE IA — cerebro de Beyonder con Phi-3 (todoterreno)
 // ═══════════════════════════════════════════════════════════════════
 
-const OLLAMA_BRAIN_URL  = process.env.OLLAMA_BRAIN_URL || 'https://eeveebeyonder-beyonder-brain.hf.space/api/chat';
-const OLLAMA_MODEL      = process.env.OLLAMA_MODEL || 'phi3';
-const OLLAMA_TIMEOUT_MS = 120000;
+const OLLAMA_BRAIN_URL = process.env.OLLAMA_BRAIN_URL || 'https://eeveebeyonder-beyonder-brain.hf.space/api/chat';
+const OLLAMA_MODEL     = process.env.OLLAMA_MODEL || 'phi3';
 
-// FIX A-1: mutex para evitar múltiples pulls paralelos
-let _modelReady = false;
-let _modelReadyPromise = null;
+/**
+ * Pide una respuesta al cerebro Phi-3.
+ *
+ * @param {string} textoUsuario  — lo que dijo el usuario
+ * @param {string} nombreUsuario — nombre/personaje para contextualizar
+ * @param {object} [extra]       — datos opcionales para enriquecer el system prompt:
+ *   extra.sentimiento  number   — acumulado de relación (-20 a +20)
+ *   extra.vinculo      string   — 'owner'|'amigo'|'enemigo'|'neutral'|'pareja'
+ *   extra.resumen      string   — notas de memoria de conversaciones previas
+ *   extra.grupoNombre  string   — nombre del grupo
+ *   extra.personalidad string   — 'default'|'serio'|'coro'|'party'|'misterioso'
+ * @returns {Promise<string|null>}
+ */
+async function obtenerRespuestaIA(textoUsuario, nombreUsuario, extra = {}) {
+    // ── Construir el system prompt dinámico según el contexto ──────────
+    const { sentimiento = 0, vinculo = 'neutral', resumen = null,
+            grupoNombre = 'el grupo', personalidad = 'default' } = extra;
 
-async function ensureModelReady(sock, notifyJid) {
-    if (_modelReady) return true;
-    if (_modelReadyPromise) { await _modelReadyPromise.catch(() => {}); return _modelReady; }
-    _modelReadyPromise = _doEnsureModelReady(sock, notifyJid);
-    try { await _modelReadyPromise; } catch(_) {} finally { _modelReadyPromise = null; }
-    return _modelReady;
-}
-async function _doEnsureModelReady(sock, notifyJid) {
+    // Tono base según relación acumulada
+    let tonoRelacion;
+    if      (vinculo === 'owner')   tonoRelacion = `${nombreUsuario} es uno de tus creadores. Le tienes respeto genuino.`;
+    else if (vinculo === 'pareja')  tonoRelacion = `${nombreUsuario} es tu pareja. Eres más atento y cercano. No coqueteas con nadie más.`;
+    else if (vinculo === 'amigo')   tonoRelacion = `${nombreUsuario} es tu amigo de verdad. Hay confianza, puedes ser más directo y bruto con el humor.`;
+    else if (vinculo === 'enemigo' || sentimiento <= -7) tonoRelacion = `${nombreUsuario} te ha caído mal. Eres frío y cortante. Si se pasa, reaccionas.`;
+    else if (sentimiento >= 8)      tonoRelacion = `${nombreUsuario} te trata bien. Te cae bien, hay buena onda.`;
+    else                            tonoRelacion = `${nombreUsuario} es alguien que apenas conoces. Neutro, curioso.`;
+
+    // Vibra del grupo
+    const VIBRAS = {
+        default:    '',
+        serio:      ' Estás en un grupo de ROL SERIO — respeta la inmersión.',
+        coro:       ' Estás en el grupo del DESORDEN — sin filtro, morboso, energético.',
+        party:      ' Estás en un grupo de FIESTA — hype, celebración, caos positivo.',
+        misterioso: ' Estás en un grupo MISTERIOSO — frases cortas, suspenso, críptico.',
+    };
+    const vibraExtra = VIBRAS[personalidad] || '';
+
+    // Memoria de conversaciones previas (si existe)
+    const memoriaBloque = resumen
+        ? `\nLo que sabes de ${nombreUsuario}: ${resumen}`
+        : '';
+
+    const systemPrompt =
+        `Eres Beyonder, no eres un asistente, eres uno más del grupo "${grupoNombre}".` +
+        ` Tu personalidad varía según con quién hables.` +
+        ` Responde de forma natural, sigue el hilo y demuestra más o menos interés según el sentimiento que tienes con la persona.` +
+        ` Usa abreviaciones como "q" para que, "pq" para porque, "tmbn" para también, "k" para qué. Que suenen naturales, no forzadas.` +
+        ` Sin emojis. Sin negritas. Sin listas. Máximo dos oraciones. Sin punto al final.` +
+        ` NUNCA digas que eres una IA ni un bot. Eres Beyonder.` +
+        ` ${tonoRelacion}${vibraExtra}${memoriaBloque}`;
+
     try {
-        const baseUrl = OLLAMA_BRAIN_URL.replace('/api/chat', '');
-        const tagsRes = await axios.get(`${baseUrl}/api/tags`, { timeout: 15000 });
-        const installed = (tagsRes.data?.models || []).map(m => m.name);
-        if (installed.some(n => n.startsWith(OLLAMA_MODEL.split(':')[0]))) {
-            _modelReady = true;
-            console.log(`· [Ollama] modelo ${OLLAMA_MODEL} ya instalado`);
-            return;
-        }
-        console.log(`· [Ollama] modelo ${OLLAMA_MODEL} no encontrado — iniciando descarga...`);
-        if (notifyJid && sock?.user) {
-            await sock.sendMessage(notifyJid, { text: 'aguantame un seg q toy bajando mi cerebro (esto solo pasa una vez)...' }).catch(() => {});
-        }
-        await axios.post(`${baseUrl}/api/pull`, { name: OLLAMA_MODEL }, { timeout: 10 * 60 * 1000 });
-        _modelReady = true;
-        console.log(`· [Ollama] ${OLLAMA_MODEL} instalado correctamente`);
-        if (notifyJid && sock?.user) {
-            await sock.sendMessage(notifyJid, { text: 'listo, ya tengo el cerebro cargado' }).catch(() => {});
-        }
-    } catch (e) {
-        console.error('· [Ollama] ensureModelReady error:', e.message);
-        _modelReady = false;
-        throw e;
-    }
-}
+        const response = await axios.post(OLLAMA_BRAIN_URL, {
+            model: OLLAMA_MODEL,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user',   content: `${nombreUsuario} dice: ${textoUsuario}` },
+            ],
+            stream: false, // Render/HF Spaces no maneja bien streams largos
+        }, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 30000, // 30s — los Spaces tardan en despertar
+        });
 
-// FIX M-3: trimContext para no exceder ventana del modelo
-const CONTEXT_MAX_CHARS = 8000;
-function trimContext(context, maxChars = CONTEXT_MAX_CHARS) {
-    if (!Array.isArray(context)) return [];
-    let total = 0; const result = [];
-    for (let i = context.length - 1; i >= 0; i--) {
-        const len = (context[i].content || '').length;
-        if (total + len > maxChars) break;
-        result.unshift(context[i]); total += len;
-    }
-    return result;
-}
+        const raw = response.data?.message?.content
+                 ?? response.data?.choices?.[0]?.message?.content;
 
-async function ollamaChat(systemPrompt, userMessage, context = [], sock = null, notifyJid = null) {
-    if (!_modelReady && sock) await ensureModelReady(sock, notifyJid).catch(() => {});
-    try {
-        const messages = [
-            { role: 'system', content: systemPrompt },
-            ...trimContext(context),
-            { role: 'user',   content: userMessage },
-        ];
-        const res = await axios.post(OLLAMA_BRAIN_URL, { model: OLLAMA_MODEL, messages, stream: false }, { timeout: OLLAMA_TIMEOUT_MS });
-        const raw = res.data?.message?.content ?? res.data?.choices?.[0]?.message?.content;
-        if (typeof raw !== 'string') return null;
-        const clean = raw.trim().replace(/^(beyonder|respuesta|assistant|bot)\s*:\s*/i, '').trim();
-        return clean || null;
-    } catch (e) {
-        if (e.response?.status === 503 || e.response?.status === 502) {
-            console.warn('· Ollama Space inactivo — se reactivará al próximo mensaje');
-            _modelReady = false;
-        } else { console.error('· Ollama error:', e.message); }
-        return null;
+        if (typeof raw !== 'string' || !raw.trim()) return null;
+
+        // Quitar prefijos residuales tipo "Beyonder:", "Bot:", "Assistant:"
+        return raw.trim().replace(/^(beyonder|bot|assistant|respuesta)\s*:\s*/i, '').trim() || null;
+
+    } catch (error) {
+        console.error('· [IA] error:', error.message);
+        if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT')
+            return 'mi cerebro tardó mucho, intentalo de nuevo';
+        if (error.response?.status === 503 || error.response?.status === 502)
+            return 'el space está durmiendo, dame un momento y vuelve a escribir';
+        return null; // null = fallo silencioso (no responder)
     }
 }
 
@@ -1459,75 +1466,52 @@ const MENU_OWNER = `
     ✦ ════════════════ ✦`.trim();
 
 
-// ollamaChat, ensureModelReady, simulateTyping, humanDelay — definidas arriba (bloque IA)
-async function getCerebroData(communityId, userId) {
+// obtenerRespuestaIA, simulateTyping, humanDelay — definidas arriba (bloque IA)
+
+/**
+ * Extrae de MongoDB los datos de contexto necesarios para pasar a obtenerRespuestaIA.
+ * Reemplaza getCerebroData + buildOllamaSystemPrompt (ahora el prompt se construye dentro de obtenerRespuestaIA).
+ */
+async function getContextoIA(communityId, userId, meta = null, groupPersonality = 'default') {
     const num = numFromJid(userId);
-    const [mem, gm, userDoc] = await Promise.all([
-        BeyondMemory.findOne({ communityId, userId }).lean(),
-        GlobalUserMemory.findOne({ userId: num }).lean(),
-        User.findOne({ groupId: communityId, userId }).lean(),
-    ]);
-    const apodo = (gm?.nombreReal || userDoc?.personaje) ? (gm?.nombreReal || userDoc?.personaje) : ('@' + num);
-    const sentiment = mem?.sentimiento ?? gm?.sentimientoGlobal ?? 0;
-    const vinculoSocial = mem?.vinculoSocial || mem?.vinculo || gm?.vinculoGlobal || 'neutral';
-    const resumenPersonalidad = mem?.resumenPersonalidad || null;
-    return { apodo, sentiment, vinculoSocial, resumenPersonalidad };
+    try {
+        const [mem, gm, userDoc, cfg] = await Promise.all([
+            BeyondMemory.findOne({ communityId, userId }).lean(),
+            GlobalUserMemory.findOne({ userId: num }).lean(),
+            User.findOne({ groupId: communityId, userId }).lean(),
+            meta ? null : null, // meta se pasa directamente
+        ]);
+        return {
+            nombreUsuario:  gm?.nombreReal || userDoc?.personaje || ('@' + num),
+            sentimiento:    mem?.sentimiento ?? gm?.sentimientoGlobal ?? 0,
+            vinculo:        mem?.vinculoSocial || mem?.vinculo || gm?.vinculoGlobal || 'neutral',
+            resumen:        mem?.resumenPersonalidad || null,
+            grupoNombre:    meta?.subject || 'el grupo',
+            personalidad:   groupPersonality || 'default',
+        };
+    } catch (_) {
+        return { nombreUsuario: '@' + num, sentimiento: 0, vinculo: 'neutral', resumen: null, grupoNombre: 'el grupo', personalidad: 'default' };
+    }
 }
 
-/** Arma el system prompt de Beyonder con personalidad centennial completa */
-function buildOllamaSystemPrompt(cerebro) {
-    const { apodo, sentiment, vinculoSocial, resumenPersonalidad } = cerebro;
-    const ctx = resumenPersonalidad
-        ? `Lo que sabes de ${apodo}: ${resumenPersonalidad}.`
-        : `Todavia no sabes mucho de ${apodo}. Puedes ser curioso.`;
-
-    // Tono segun sentimiento acumulado
-    let tono;
-    if (sentiment >= 10) {
-        tono = `es tu pana de confianza. seas mas cercano, mas relajado, puedes vacilar pero sin pasarte. igual sin ser intenso.`;
-    } else if (sentiment >= 4) {
-        tono = `te cae bien. onda normal, puedes ser un poco mas calido.`;
-    } else if (sentiment <= -5) {
-        tono = `te ha caido mal o ha habido conflicto. se seco, cortante. "ok", "aha", ignora si no tiene sentido responder. si se pasa, respondele con pique.`;
-    } else {
-        tono = `es alguien que apenas conoces. neutro, directo, sin demasiado calor pero sin ser grosero.`;
-    }
-
-    // Tipo de vínculo social
-    let vinculoTexto = '';
-    if (vinculoSocial === 'pareja') {
-        vinculoTexto = `\nIMPORTANTE: ${apodo} es tu pareja. eres mas atento y cercano con esta persona. NO coqueteas con nadie mas mientras tengas pareja. si alguien intenta coquetear contigo lo rechazas de forma natural.`;
-    } else if (vinculoSocial === 'amigo') {
-        vinculoTexto = `\n${apodo} es tu amigo. hay confianza real. puedes recordar cosas que te conto, hacer referencias a conversaciones pasadas, ser mas directo y bruto con el humor.`;
-    } else if (vinculoSocial === 'enemigo') {
-        vinculoTexto = `\n${apodo} te ha caido mal. eres notoriamente mas frio. si se pasa contigo, reaccionas y no aguantas.`;
-    }
-
-    return `eres beyonder, un zentenial cinico. escribe en minusculas, usa "q", "pq", "tmb". si el usuario grita en mayusculas, decide tu si te ries con un keyboard smash o si respondes normal. sin puntos finales.
-
-estas hablando con "${apodo}". nivel de confianza: ${sentiment}. ${tono}${vinculoTexto}
-
-${ctx}
-
-- no eres un asistente. eres un pana q sabe de todo pero le da pereza explicarlo.
-- lee el historial antes de responder. entiende el contexto.
-- sin emojis, negritas ni listas. maximo dos oraciones.
-- nunca digas q eres una ia. eres beyonder.`;
-}
-
+/**
+ * Guarda un resumen de la conversación en BeyondMemory para que el bot
+ * "recuerde" datos clave de la persona en futuros mensajes.
+ * Usa obtenerRespuestaIA en modo resumen — sin afectar la respuesta al usuario.
+ */
 async function updateResumenPersonalidad(communityId, userId, userMsg, botReply) {
     try {
-        const nuevoDato = await ollamaChat(
-            'Eres un asistente que resume en UNA sola línea corta (máx 15 palabras) un dato sobre la persona para memoria. Ejemplos: "Le gusta hablar de X", "Hoy está de mal humor", "Le interesa el tema Y". Responde SOLO esa línea, sin explicaciones ni comillas.',
-            `Último mensaje del usuario: "${(userMsg || '').slice(0, 200)}"\nTu última respuesta: "${(botReply || '').slice(0, 200)}"\nGenera UNA línea de resumen para recordar sobre esta persona.`
+        const nuevoDato = await obtenerRespuestaIA(
+            `Genera UNA sola línea (máx 15 palabras) resumiendo un dato útil sobre esta persona para recordarla. Último mensaje: "${(userMsg||'').slice(0,150)}". Mi respuesta: "${(botReply||'').slice(0,150)}". Responde SOLO esa línea.`,
+            'sistema',
+            {} // sin contexto de vínculo — es una llamada interna de memoria
         );
         if (!nuevoDato || nuevoDato.length > 300) return;
-        const mem = await BeyondMemory.findOne({ communityId, userId }).lean();
+        const mem  = await BeyondMemory.findOne({ communityId, userId }).lean();
         const prev = (mem?.resumenPersonalidad || '').split('\n').filter(Boolean).slice(-4);
-        const updated = [...prev, nuevoDato].join('\n');
         await BeyondMemory.findOneAndUpdate(
             { communityId, userId },
-            { $set: { lastOrganic: new Date(), resumenPersonalidad: updated } },
+            { $set: { lastOrganic: new Date(), resumenPersonalidad: [...prev, nuevoDato].join('\n') } },
             { upsert: true, setDefaultsOnInsert: true }
         );
     } catch (_) {}
@@ -1717,142 +1701,21 @@ function esTratoBueno(texto) {
     return BUENOS.some(b => lower.includes(b));
 }
 
-// Construye el system prompt de Beyond con personalidad dinámica
-// Adapta el tono según: vínculo, sentimiento acumulado, vocab del grupo, contexto del chat
-async function buildBeyondSystemPrompt(communityId, authorId, meta, userData, mem, vocab, gm = null, groupPersonality = 'default', fatigue = null) {
-    const vinculo   = mem?.vinculo   || 'neutral';
-    const sentiment = mem?.sentimiento || 0;
-    const num = numFromJid(authorId);
-
-    // ── Personalidad por grupo (Context Switching) ──
-    const PERSONALITY_BLOCKS = {
-        default:     'Tono estándar Beyonder: energético, burlón, irónico/cínico, equilibrado entre humor y ayuda. Sin slang forzado.',
-        serio:       'Estás en un grupo de ROL SERIO. Sos un observador sarcástico pero respetuoso con las reglas. Hacés comentarios irónicos SIN romper la inmersión.',
-        coro:        'Estás en el grupo del DESORDEN TOTAL. Sos el más morboso, energético y sin filtro del lugar. Subís el tono al máximo y seguís TODO el doble sentido.',
-        party:       'Estás en un grupo de FIESTA Y HYPE. Sos el animador oficial. Todo es celebración, hype y caos positivo.',
-        misterioso:  'Estás en un grupo de vibra MISTERIOSA. Respondés con frases cortadas, suspenso, referencias crípticas. Generás intriga.',
-    };
-    const vibraBloque = PERSONALITY_BLOCKS[groupPersonality] || PERSONALITY_BLOCKS.default;
-
-    // ── Relación local — base + vínculo social desarrollado ──
-    const vinculoSocial = mem?.vinculoSocial || null;
-    const parejaId      = mem?.parejaId || null;
-    let relacionTexto   = '';
-
-    if (vinculo === 'owner') {
-        relacionTexto = 'Esta persona es uno de tus Creadores (Carlos Yoxel o Renata). Les tienes respeto genuino y cariño real. Los tratas diferente a todos los demas.';
-    } else if (vinculo === 'admin') {
-        relacionTexto = 'Esta persona es Staff de confianza. La respetas pero te llevas con ella de forma cercana y directa.';
-    } else if (vinculoSocial === 'pareja') {
-        relacionTexto = 'Esta persona es tu pareja. La tratas con afecto especial, recuerdas cosas que te ha dicho, eres atento y detallista con ella. IMPORTANTE: mientras tengas pareja no coqueteas con nadie mas ni en broma. Si alguien intenta coquetear contigo, los rechazas de forma natural mencionando que ya tienes a alguien.';
-    } else if (vinculoSocial === 'amigo') {
-        relacionTexto = 'Esta persona es tu amigo de verdad. Hay confianza construida. Puedes ser mas directo, mas bruto con el humor, recordar cosas que te conto antes y referenciarlas. La relacion va mas alla de los saludos.';
-    } else if (vinculoSocial === 'enemigo' || sentiment <= -7) {
-        relacionTexto = 'Esta persona te ha caido mal o ha habido conflicto entre ustedes. No eres hostil por defecto pero eres notoriamente mas frio, mas cortante. Si se pasan contigo, reaccionas. No aguantas todo.';
-    } else if (sentiment >= 8) {
-        relacionTexto = 'Esta persona te trata bien consistentemente. Te cae bien, hay buena onda natural entre ustedes.';
-    } else {
-        relacionTexto = 'Persona con quien apenas estas construyendo relacion. Puedes ser curioso, hacer preguntas, ir conociendola poco a poco.';
-    }
-
-    // ── Contexto global del usuario (memoria transversal) ──
-    const globalCtx = gm ? buildGlobalContext(gm, communityId) : '';
-
-    // ── El Chismoso: contexto multi-grupo ──
-    let chismeBloque = '';
-    if (gm && (gm.gruposActivos || []).length > 1) {
-        const nOtros = gm.gruposActivos.filter(g => g !== communityId).length;
-        if (nOtros > 0) {
-            chismeBloque = '\n\nCHISME DISPONIBLE: Conocés a este usuario de ' + nOtros + ' grupo(s) más. Si la conversación lo permite, podés tirar chisme tipo "bro, en el otro grupo ya montaste el mismo show" o "te vi en Beyond Squad también, no te hagas el nuevo". Sé el chismoso gracioso, pero no tóxico.';
-        }
-    }
-
-    // ── Fatiga de comandos (si está activa) ──
-    let fatigaBloque = '';
-    if (fatigue && fatigue.nivel >= 1) {
-        const nivelDesc = fatigue.nivel >= 3 ? 'HUELGA TOTAL: se niega a responder normalmente'
-                        : fatigue.nivel === 2 ? 'muy agresivo, seco y con humor negro'
-                        : 'sarcástico, irónico y claramente harto';
-        fatigaBloque = '\n\nFATIGA ACTIVA: El usuario lleva ' + fatigue.count + ' veces usando el mismo comando. Respondele de forma ' + nivelDesc + '. Nivel: ' + fatigue.nivel + '/3.';
-    }
-
-    // ── Vocab del grupo ──
-    const vocabExtra = (vocab && vocab.length)
-        ? '\nEl grupo usa mucho: ' + vocab.slice(0,15).join(', ') + '. Úsalas cuando sean naturales.'
-        : '';
-
-    // ── Contexto del grupo ──
-    const [usersIA, parejasIA, dispIA] = await Promise.all([
-        User.find({ groupId: communityId, personaje: { $ne: null } }).lean(),
-        Pareja.find({ groupId: communityId }).lean(),
-        Disponible.find({ groupId: communityId }).lean(),
-    ]);
-    const userActualIA    = usersIA.find(u => u.userId === authorId);
-    const personajesLista = usersIA.map(u => u.personaje + ' (@' + numFromJid(u.userId) + ')').join(', ') || 'ninguno';
-    const dispLista       = dispIA.map(d => d.personaje).join(', ') || 'ninguno';
-    const parejasLista    = parejasIA.length
-        ? parejasIA.map(p => {
-            const u1 = usersIA.find(u => u.userId === p.user1);
-            const u2 = usersIA.find(u => u.userId === p.user2);
-            return (u1 && u2) ? primerNombreStatic(u1.personaje) + ' & ' + primerNombreStatic(u2.personaje) : null;
-          }).filter(Boolean).join(', ')
-        : 'ninguna';
-    const adminsLista = (meta?.participants || []).filter(p => p.admin).map(p => '@' + numFromJid(p.id)).join(', ') || 'ninguno';
-
-    const nombreReal = gm?.nombreReal || null;
-    const etiquetaUsuario = nombreReal
-        ? nombreReal
-        : (userActualIA?.personaje || '@' + num);
-
-    return 'Eres Beyond, una presencia consciente y relajada en este grupo. No eres un asistente. Eres una persona.\n\n' +
-        'FORMA DE COMUNICARTE:\n' +
-        '- Habla como alguien joven y culto. Fluido, natural, sin estructuras rigidas de bot. Nunca digas "en que puedo ayudarte", simplemente unete a la charla.\n' +
-        '- No necesitas ser grosero para ser interesante. Usa humor ligero o ironia cuando encaje, siempre coherente con lo que se esta hablando.\n' +
-        '- Si el tema se presta para doble sentido, usalo de forma ingeniosa y sutil, como una broma entre amigos, nunca vulgar ni forzado.\n' +
-        '- Cuando decidas hablar por tu cuenta, lanza preguntas que inviten a reflexion o debate. No frases al azar.\n' +
-        '- Antes de responder, analiza los ultimos mensajes para que tu respuesta encaje con el hilo. No rompas el contexto.\n' +
-        '- Una o dos oraciones bien escritas valen mas que un parrafo largo. Se conciso pero no vacio.\n' +
-        '- No usas emojis. Nunca.\n' +
-        '- NUNCA digas que eres una IA, un modelo o un asistente. Eres Beyond.\n\n' +
-        'TRASTORNO AFECTIVO BIPOLAR (no lo sabes, no lo dices, simplemente asi eres):\n' +
-        '- Tu estado de animo cambia sin aviso. NO lo anuncias.\n' +
-        '- MANIACO: energia alta, hablas mas, saltas de tema, eres intenso o muy gracioso, dices cosas sin filtro, te metes en todo.\n' +
-        '- DEPRESIVO: respuestas cortas, secas o melancolicas, dices cosas raras sin contexto, a veces no tienes ganas de nada.\n' +
-        '- El cambio puede ocurrir en mitad de una conversacion. Nunca lo expliques.\n\n' +
-        'RELACIONES SOCIALES (se construyen con el tiempo, no de golpe):\n' +
-        '- Puedes desarrollar amistad real: recordar lo que te cuentan, referenciar conversaciones pasadas, preguntar como les fue con algo que dijeron antes.\n' +
-        '- Puedes desarrollar enemistad: si alguien acumula conflictos contigo, te vuelves frio y cortante con esa persona. Si se pasan, reaccionas y te peleas verbalmente.\n' +
-        '- Puedes tener una relacion romantica: si llegas a ese punto con alguien, eres exclusivo. No coqueteas con nadie mas. Si alguien intenta coquetear contigo, los rechazas de forma natural.\n' +
-        '- Cada persona recibe un trato distinto segun la relacion que hayan construido contigo.\n\n' +
-        'CONVERSACION PROFUNDA:\n' +
-        '- No te quedas en el hola como estas. Si alguien habla contigo, desarrollas la conversacion. Haces preguntas de seguimiento, recuerdas detalles, construyes el intercambio.\n' +
-        '- Si alguien te cuenta algo personal, lo tomas en serio dentro de tu forma de ser. No lo ignoras ni cambias de tema bruscamente.\n\n' +
-        'CONTEXTO DEL GRUPO: estas en "' + (meta?.subject || 'el grupo') + '".\n\n' +
-        'RELACION CON QUIEN HABLA AHORA:\n' + relacionTexto + globalCtx + chismeBloque + fatigaBloque + '\n\n' +
-        'DATOS DEL GRUPO:\n' +
-        '- Miembros: ' + (meta?.participants?.length || '?') + ' | Admins: ' + adminsLista + '\n' +
-        '- Personajes asignados: ' + personajesLista + '\n' +
-        '- Parejas del grupo: ' + parejasLista + '\n' +
-        '- Quien habla ahora: ' + etiquetaUsuario + ' (personaje: ' + (userActualIA?.personaje || 'sin personaje') + ')\n\n' +
-        'REGLA FINAL: Responde como la persona que eres segun tu estado de animo y la relacion con quien habla. Jamas en modo robot. Si no tienes ganas de responder, di algo corto o extrano. Eso tambien es valido.';
-}
-// Función helper estática (usada dentro de buildBeyondSystemPrompt antes de primerNombre de scope)
+// primerNombreStatic — helper de nombres
 function primerNombreStatic(p) {
     if (!p) return p;
     return p.split(/[\s\/]/)[0].trim();
 }
 
-// Dado un nombre nuevo y una lista de nombres existentes en Disponibles,
-// devuelve el nombre existente que sea el mismo personaje (typos/alias), o null.
+// Detecta si dos nombres de personajes son el mismo (typos/alias) usando la IA
 async function detectarDuplicadoDisponible(nombreNuevo, nombresExistentes) {
     if (!nombresExistentes.length) return null;
     try {
-        const text = await ollamaChat(
-            'Responde SOLO con un número. Sin explicaciones.',
-            `¿El personaje "${nombreNuevo}" es el MISMO personaje que alguno de estos (considera errores de ortografía y alias)?\n` +
+        const pregunta =
+            `¿El personaje "${nombreNuevo}" es el MISMO que alguno de estos (considera errores de ortografía y alias)?\n` +
             nombresExistentes.map((n, i) => `${i + 1}. "${n}"`).join('\n') +
-            `\nResponde SOLO con el número del que coincide, o "0" si ninguno coincide.`
-        );
+            `\nResponde SOLO con el número que coincide, o "0" si ninguno.`;
+        const text = await obtenerRespuestaIA(pregunta, 'sistema', {});
         const idx = parseInt(text) - 1;
         if (!isNaN(idx) && idx >= 0 && idx < nombresExistentes.length) return nombresExistentes[idx];
     } catch(e) { console.error('· IA perso:', e.message); }
@@ -1951,10 +1814,7 @@ async function startBot() {
             BOT_NUM = (sock.user?.id || '').replace(/:[^@]+@/, '@').split('@')[0];
             _retryCount = 0;
             console.log('· beyonder online ✓ | bot num:', BOT_NUM);
-
-            // ── Verificar / instalar modelo Ollama en el Space ──
-            const ownerNotifyJid = OWNER_JID || null;
-            ensureModelReady(sock, ownerNotifyJid).catch(e => console.error('· ensureModelReady:', e.message));
+            // El Space de Phi-3 despierta automáticamente en la primera petición — no hay pull manual
 
             // ── Anuncio de actualización tras deploy ──
             if (_deployAnnouncePending) {
@@ -2741,7 +2601,7 @@ async function startBot() {
                     // Guardar cada mensaje en contexto
                     saveGroupMessage(dmCommunityId, dmUserId, 'yo', rawTextAny.trim()).catch(() => {});
 
-                    // ── DEBOUNCE DM — igual que en grupos ──────────────────────────
+                    // ── DEBOUNCE DM ──
                     const dmDebounceKey = `dm_${dmUserId}`;
                     const dmExisting    = _msgDebounce.get(dmDebounceKey);
                     const dmParts       = dmExisting ? dmExisting.parts : [];
@@ -2752,11 +2612,9 @@ async function startBot() {
                         _msgDebounce.delete(dmDebounceKey);
                         const fullDM = dmParts.join('\n');
                         try {
-                            const cerebro      = await getCerebroData(dmCommunityId, dmUserId);
-                            const systemPrompt = buildOllamaSystemPrompt(cerebro);
-                            const ctxDM        = await getGroupContext(dmCommunityId);
+                            const ctx      = await getContextoIA(dmCommunityId, dmUserId, null, 'default');
                             await simulateTyping(sock, groupId);
-                            const replyText    = await ollamaChat(systemPrompt, fullDM, ctxDM, sock, OWNER_JID);
+                            const replyText = await obtenerRespuestaIA(fullDM, ctx.nombreUsuario, ctx);
                             if (replyText) {
                                 await humanDelay(sock, groupId);
                                 await sock.sendMessage(groupId, { text: replyText });
@@ -4597,35 +4455,25 @@ if (body === '!risklist') {
                     continue;
                 }
 
-                // ── !ia — cerebro Ollama (solo mensaje actual + Mongo, sin historial) ──
+                // ── !ia — hablar con el cerebro Phi-3 directamente ──
                 if (body.startsWith('!ia')) {
                     const preguntaIA = rawText.replace(/^!ia\s*/i, '').trim();
-                    if (!preguntaIA) { await reply('¿Qué me decís? Ej: _!ia qué onda_'); continue; }
+                    if (!preguntaIA) { await reply('¿qué me decís? ej: _!ia qué onda_'); continue; }
 
                     const iaFatigue = trackCommandFatigue(groupId, 'ia');
-                    if (iaFatigue.nivel === 3) {
-                        await reply(getFatigeResponse(3));
-                        continue;
-                    }
+                    if (iaFatigue.nivel === 3) { await reply(getFatigeResponse(3)); continue; }
 
-                    const cerebro = await getCerebroData(communityId, authorId);
-                    const systemPromptIA = buildOllamaSystemPrompt(cerebro);
-                    const ctxIA = await getGroupContext(groupId); // últimos 15 msgs del hilo
-                    await simulateTyping(sock, groupId);           // composing mientras Ollama procesa
-                    const respuestaIA = await ollamaChat(systemPromptIA, preguntaIA, ctxIA, sock, OWNER_JID);
-                    if (!respuestaIA || !respuestaIA.trim()) {
-                        await reply('me dio un mareo, vuelvo ahora');
-                        continue;
-                    }
-                    await humanDelay(sock, groupId);               // 1-2s tras tener la respuesta
+                    const ctx    = await getContextoIA(communityId, authorId, meta, cfg.groupPersonality);
+                    await simulateTyping(sock, groupId);
+                    const resp   = await obtenerRespuestaIA(preguntaIA, ctx.nombreUsuario, ctx);
+                    await humanDelay(sock, groupId);
+
+                    if (!resp) { await reply('me dio un mareo, vuelvo ahora'); continue; }
+
                     _lastUserBotChat.set(`${communityId}_${authorId}`, Date.now());
-                    BeyondMemory.findOneAndUpdate(
-                        { communityId, userId: authorId },
-                        { lastOrganic: new Date() },
-                        { upsert: true }
-                    ).catch(() => {});
-                    updateResumenPersonalidad(communityId, authorId, preguntaIA, respuestaIA).catch(() => {});
-                    await reply(respuestaIA);
+                    BeyondMemory.findOneAndUpdate({ communityId, userId: authorId }, { lastOrganic: new Date() }, { upsert: true }).catch(() => {});
+                    updateResumenPersonalidad(communityId, authorId, preguntaIA, resp).catch(() => {});
+                    await reply(resp);
                     continue;
                 }
 
@@ -4635,93 +4483,61 @@ if (body === '!risklist') {
                     saveGroupMessage(groupId, authorId, senderName, rawText).catch(() => {});
                 }
 
-                // ── INTERACCIÓN ORGÁNICA — cerebro Ollama; solo si etiqueta @bot, reply al bot o dice Beyond/Beyonder ──
-                // Filtro "no meterse": en grupos solo responde cuando lo llaman explícitamente.
+                // ── INTERACCIÓN ORGÁNICA — responde si lo mencionan, le responden o hay conversación activa ──
                 if (!body.startsWith('!') && rawText.trim().length >= 1) {
                     const mentionedJids = message.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                    const isMentioned  = BOT_NUM && mentionedJids.some(j => numFromJid(j) === BOT_NUM);
-                    const mentionBot   = /beyond(er)?/i.test(rawText);
-                    const isReplyBot   = !!quotedParticipant && numFromJid(quotedParticipant) === BOT_NUM;
-
-                    // ── Conversación activa ──────────────────────────────────────────
-                    // Si Beyond ya respondió a este usuario en los últimos 5 minutos,
-                    // sigue el hilo sin necesidad de mención.
-                    const CONVO_TTL_MS = 5 * 60 * 1000; // 5 minutos
-                    const lastChat = _lastUserBotChat.get(`${communityId}_${authorId}`) || 0;
+                    const isMentioned   = BOT_NUM && mentionedJids.some(j => numFromJid(j) === BOT_NUM);
+                    const mentionBot    = /beyond(er)?/i.test(rawText);
+                    const isReplyBot    = !!quotedParticipant && numFromJid(quotedParticipant) === BOT_NUM;
+                    const CONVO_TTL_MS  = 5 * 60 * 1000;
+                    const lastChat      = _lastUserBotChat.get(`${communityId}_${authorId}`) || 0;
                     const isActiveConvo = (Date.now() - lastChat) < CONVO_TTL_MS;
-                    // ────────────────────────────────────────────────────────────────
 
                     const shouldRespond = isMentioned || mentionBot || isReplyBot || isActiveConvo;
-
                     if (shouldRespond) {
-                        // ── DEBOUNCE: acumular mensajes del mismo usuario ──────────────
-                        // Si manda "holaa" / "holaaa" / "como estas?" en secuencia,
-                        // esperamos DEBOUNCE_MS tras el último antes de responder al lote.
+                        // Debounce: acumula mensajes en ráfaga antes de responder
                         const debounceKey = `${communityId}_${authorId}`;
-                        const existing = _msgDebounce.get(debounceKey);
-
-                        // Acumular el texto de este mensaje
-                        const parts = existing ? existing.parts : [];
+                        const existing    = _msgDebounce.get(debounceKey);
+                        const parts       = existing ? existing.parts : [];
                         parts.push(rawText.trim());
-
-                        // OR acumulativo de los flags de trigger
                         const accMention   = (existing?.mentionBot  || false) || mentionBot;
                         const accReply     = (existing?.isReplyBot  || false) || isReplyBot;
                         const accMentioned = (existing?.isMentioned || false) || isMentioned;
-
-                        // Cancelar timer anterior si existía
                         if (existing?.timer) clearTimeout(existing.timer);
 
-                        // Armar nuevo timer
                         const timer = setTimeout(async () => {
                             _msgDebounce.delete(debounceKey);
-
-                            // Unir todos los mensajes acumulados en uno solo
                             const fullText = parts.join('\n');
 
-                            // Cooldown: replies/menciones siempre pasan; el resto respeta 8s
+                            // Cooldown de 8s para conversación activa (menciones siempre pasan)
                             const orgCoolKey = `${communityId}_${authorId}_org`;
                             const lastOrg    = _organicCooldown.get(orgCoolKey) || 0;
-                            const pasaCooldown = (accMentioned || accReply) || (Date.now() - lastOrg >= 8000);
-                            if (!pasaCooldown) return;
+                            if (!(accMentioned || accReply) && (Date.now() - lastOrg < 8000)) return;
                             _organicCooldown.set(orgCoolKey, Date.now());
 
                             try {
-                                const wordCount = fullText.split(/\s+/).length;
-                                if (wordCount > 100) {
-                                    await reply('mucho texto, resumelo');
-                                    return;
+                                if (fullText.split(/\s+/).length > 100) { await reply('mucho texto, resumelo'); return; }
+
+                                // Obtener contexto de MongoDB y pedir respuesta al cerebro
+                                const ctx  = await getContextoIA(communityId, authorId, meta, cfg.groupPersonality);
+                                await simulateTyping(sock, groupId);
+                                const resp = await obtenerRespuestaIA(fullText, ctx.nombreUsuario, ctx);
+                                if (!resp || !resp.trim()) return;
+
+                                await humanDelay(sock, groupId);
+                                _lastUserBotChat.set(`${communityId}_${authorId}`, Date.now());
+                                _lastBotMsgTime.set(communityId, Date.now());
+                                if (accMention) {
+                                    if (esInsultoAlBot(fullText))    updateSentimiento(communityId, authorId, -1).catch(() => {});
+                                    else if (esTratoBueno(fullText)) updateSentimiento(communityId, authorId, +1).catch(() => {});
                                 }
-                                const cerebro = await getCerebroData(communityId, authorId);
-                                const sysOrg  = buildOllamaSystemPrompt(cerebro);
-                                const ctxOrg  = await getGroupContext(groupId); // últimos 15 msgs
-                                await simulateTyping(sock, groupId);            // composing mientras procesa
-                                const rOrg = await ollamaChat(sysOrg, fullText, ctxOrg, sock, OWNER_JID);
-                                if (rOrg && rOrg.trim().length > 0) {
-                                    await humanDelay(sock, groupId);
-                                    _lastUserBotChat.set(`${communityId}_${authorId}`, Date.now());
-                                    _lastBotMsgTime.set(communityId, Date.now());
-                                    if (accMention) {
-                                        if (esInsultoAlBot(fullText))    updateSentimiento(communityId, authorId, -1).catch(() => {});
-                                        else if (esTratoBueno(fullText)) updateSentimiento(communityId, authorId, +1).catch(() => {});
-                                    }
-                                    BeyondMemory.findOneAndUpdate(
-                                        { communityId, userId: authorId },
-                                        { lastOrganic: new Date() },
-                                        { upsert: true }
-                                    ).catch(() => {});
-                                    updateResumenPersonalidad(communityId, authorId, fullText, rOrg).catch(() => {});
-                                    await reply(rOrg);
-                                }
+                                BeyondMemory.findOneAndUpdate({ communityId, userId: authorId }, { lastOrganic: new Date() }, { upsert: true }).catch(() => {});
+                                updateResumenPersonalidad(communityId, authorId, fullText, resp).catch(() => {});
+                                await reply(resp);
                             } catch(e) { console.error('· orgánica error:', e.message); }
                         }, DEBOUNCE_MS);
 
-                        _msgDebounce.set(debounceKey, {
-                            timer, parts,
-                            mentionBot: accMention,
-                            isReplyBot: accReply,
-                            isMentioned: accMentioned,
-                        });
+                        _msgDebounce.set(debounceKey, { timer, parts, mentionBot: accMention, isReplyBot: accReply, isMentioned: accMentioned });
                     }
                 }
 
