@@ -256,12 +256,8 @@ async function queryNudeNet(buffer) {
         // Conexión fresca en cada llamada — más robusto si el Space se reinicia
         const client = await Client.connect(process.env.ANTINSFW_SPACE);
         const result = await client.predict(0, [buffer]);
-
-        // Debug: ver exactamente qué devuelve el Space (útil cuando cambia el formato)
-        console.log('· Debug AntiNSFW:', JSON.stringify(result.data));
-
-        // result.data puede ser un array o un objeto directo según el Space
-        return result.data?.[0] || result.data || null;
+        console.log('· Debug AntiNSFW:', result.data); // mira esto en el log de Render
+        return result.data ? result.data[0] : null;
 
     } catch (e) {
         console.error('· [Gradio] queryNudeNet error:', e.message);
@@ -407,13 +403,13 @@ async function obtenerRespuestaIA(textoUsuario, nombreUsuario, extra = {}) {
     try {
         const { vinculo = 'neutral', sentimiento = 0 } = extra;
 
-        // Usamos @gradio/client igual que el Anti-NSFW — infalible con HuggingFace.
-        // Limpiamos la URL por si apunta a /api/chat o /api/generate en vez de al Space raíz.
-        const spaceUrl = (process.env.OLLAMA_BRAIN_URL || '')
-            .replace('/api/chat', '')
-            .replace('/api/generate', '');
+        // Limpiamos la URL de cualquier ruta extra antes de conectar a Gradio
+        const cleanUrl = (process.env.OLLAMA_BRAIN_URL || '')
+            .replace(/\/api\/(chat|generate)$/, '')
+            .replace(/\/v1\/chat\/completions$/, '')
+            .trim();
 
-        const client = await Client.connect(spaceUrl);
+        const client = await Client.connect(cleanUrl);
 
         const prompt = `Eres Beyonder Bot. Hablas con ${nombreUsuario}. Vínculo: ${vinculo}. Sentimiento: ${sentimiento}. Responde corto y natural. Usuario dice: ${textoUsuario}`;
 
