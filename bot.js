@@ -401,27 +401,18 @@ const OLLAMA_MODEL     = process.env.OLLAMA_MODEL || 'phi3';
  */
 async function obtenerRespuestaIA(textoUsuario, nombreUsuario, extra = {}) {
     try {
-        const { vinculo = 'neutral', sentimiento = 0 } = extra;
+        // Usamos el ID del Space directamente — más confiable que limpiar una URL
+        // Configurable desde .env con OLLAMA_SPACE_ID, o hardcoded como fallback
+        const spaceID = process.env.OLLAMA_SPACE_ID || 'EeveeBeyonder/beyonder-brain';
+        const client  = await Client.connect(spaceID);
 
-        // Quitamos cualquier ruta (/api/chat, /v1, etc.) y barras finales
-        const spaceUrl = (process.env.OLLAMA_BRAIN_URL || '')
-            .split('/api')[0]
-            .split('/v1')[0]
-            .replace(/\/$/, '')
-            .trim();
-
-        const client = await Client.connect(spaceUrl);
-
-        const prompt = `Eres Beyonder Bot. Hablas con ${nombreUsuario}. Vínculo: ${vinculo}. Sentimiento: ${sentimiento}. Responde corto y natural. Usuario dice: ${textoUsuario}`;
-
-        // Índice 0 = primera función del Space (el chat en Phi-3 de HF)
+        const prompt = `Responde corto. Usuario: ${textoUsuario}`;
         const result = await client.predict(0, [prompt]);
-
         return result.data[0] || null;
 
     } catch (e) {
         console.error('· Error crítico en cerebro Phi-3:', e.message);
-        return 'mi cerebro se desconectó un segundo, repíteme eso...';
+        return null;
     }
 }
 
