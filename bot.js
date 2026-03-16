@@ -403,13 +403,14 @@ async function obtenerRespuestaIA(textoUsuario, nombreUsuario, extra = {}) {
     try {
         const { vinculo = 'neutral', sentimiento = 0 } = extra;
 
-        // Limpiamos la URL de cualquier ruta extra antes de conectar a Gradio
-        const cleanUrl = (process.env.OLLAMA_BRAIN_URL || '')
-            .replace(/\/api\/(chat|generate)$/, '')
-            .replace(/\/v1\/chat\/completions$/, '')
+        // Quitamos cualquier ruta (/api/chat, /v1, etc.) y barras finales
+        const spaceUrl = (process.env.OLLAMA_BRAIN_URL || '')
+            .split('/api')[0]
+            .split('/v1')[0]
+            .replace(/\/$/, '')
             .trim();
 
-        const client = await Client.connect(cleanUrl);
+        const client = await Client.connect(spaceUrl);
 
         const prompt = `Eres Beyonder Bot. Hablas con ${nombreUsuario}. Vínculo: ${vinculo}. Sentimiento: ${sentimiento}. Responde corto y natural. Usuario dice: ${textoUsuario}`;
 
