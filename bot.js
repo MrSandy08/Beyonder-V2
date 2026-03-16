@@ -259,24 +259,19 @@ async function getGradioClient() {
  * Devuelve null si el Space no responde o lanza error.
  */
 async function queryNudeNet(buffer) {
-    if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
     try {
-        const client = await getGradioClient();
-
-        // Índice 0 = primera función del Space — estándar para cualquier Space de NudeNet.
-        // Más robusto que usar el nombre '/predict' porque no depende de cómo se llamó en app.py.
+        // Conexión fresca en cada llamada — más robusto si el Space se reinicia
+        const client = await Client.connect(process.env.ANTINSFW_SPACE);
         const result = await client.predict(0, [buffer]);
 
-        return normalizarRespuestaGradio(result.data);
+        // Debug: ver exactamente qué devuelve el Space (útil cuando cambia el formato)
+        console.log('· Debug AntiNSFW:', JSON.stringify(result.data));
+
+        // result.data puede ser un array o un objeto directo según el Space
+        return result.data?.[0] || result.data || null;
 
     } catch (e) {
-        // Si el cliente cacheado falló (Space reiniciado, etc.), forzar reconexión la próxima vez
-        if (e.message?.includes('Space') || e.message?.includes('connect') || e.message?.includes('503')) {
-            console.warn('· [Gradio] Space inaccesible, reconectando en próximo intento:', e.message);
-            _gradioClient = null;
-        } else {
-            console.error('· [Gradio] queryNudeNet error:', e.message);
-        }
+        console.error('· [Gradio] queryNudeNet error:', e.message);
         return null;
     }
 }
@@ -417,30 +412,26 @@ const OLLAMA_MODEL     = process.env.OLLAMA_MODEL || 'phi3';
  */
 async function obtenerRespuestaIA(textoUsuario, nombreUsuario, extra = {}) {
     try {
-        const { sentimiento = 0, vinculo = 'neutral', resumen = '', personalidad = '' } = extra;
+        const { vinculo = 'neutral', resumen = '' } = extra;
 
-        // System prompt dinámico con los datos que vienen de MongoDB
-        const systemPrompt = `Eres Beyonder Bot.
-        Hablas con ${nombreUsuario} (Vínculo: ${vinculo}, Sentimiento: ${sentimiento}).
-        Contexto previo: ${resumen}.
-        Personalidad del grupo: ${personalidad}.
-        Responde de forma corta, natural y con jerga si es necesario. No parezcas un robot.`;
+        // Formato /api/generate (Ollama nativo) con `prompt` en lugar de `messages`
+        // Muchos Spaces de Phi-3 en HF usan este endpoint
+        const promptCompleto =
+            `Instrucciones: Eres Beyonder Bot, un asistente natural.\n` +
+            `Contexto: Hablas con ${nombreUsuario}, vínculo ${vinculo}. ${resumen}\n` +
+            `Usuario: ${textoUsuario}\n` +
+            `Respuesta corta:`;
 
         const response = await axios.post(process.env.OLLAMA_BRAIN_URL, {
-            model: process.env.OLLAMA_MODEL || 'phi3',
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user',   content: textoUsuario },
-            ],
+            model: 'phi3',
+            prompt: promptCompleto,  // /api/generate usa prompt, no messages
             stream: false,
-        }, {
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 35000, // tiempo extra por si el Space está despertando
-        });
+        }, { timeout: 35000 });
 
-        // Manejamos los dos formatos posibles de respuesta de Hugging Face
-        return response.data.message?.content
-            || response.data.choices?.[0]?.message?.content
+        // /api/generate devuelve response.data.response
+        // /api/chat devuelve response.data.message.content — cubrimos ambos
+        return response.data.response
+            || response.data.message?.content
             || null;
 
     } catch (e) {
