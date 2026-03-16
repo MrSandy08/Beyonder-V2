@@ -421,71 +421,36 @@ const OLLAMA_MODEL     = process.env.OLLAMA_MODEL || 'phi3';
  * @returns {Promise<string|null>}
  */
 async function obtenerRespuestaIA(textoUsuario, nombreUsuario, extra = {}) {
-    // ── Construir el system prompt dinámico según el contexto ──────────
-    const { sentimiento = 0, vinculo = 'neutral', resumen = null,
-            grupoNombre = 'el grupo', personalidad = 'default' } = extra;
-
-    // Tono base según relación acumulada
-    let tonoRelacion;
-    if      (vinculo === 'owner')   tonoRelacion = `${nombreUsuario} es uno de tus creadores. Le tienes respeto genuino.`;
-    else if (vinculo === 'pareja')  tonoRelacion = `${nombreUsuario} es tu pareja. Eres más atento y cercano. No coqueteas con nadie más.`;
-    else if (vinculo === 'amigo')   tonoRelacion = `${nombreUsuario} es tu amigo de verdad. Hay confianza, puedes ser más directo y bruto con el humor.`;
-    else if (vinculo === 'enemigo' || sentimiento <= -7) tonoRelacion = `${nombreUsuario} te ha caído mal. Eres frío y cortante. Si se pasa, reaccionas.`;
-    else if (sentimiento >= 8)      tonoRelacion = `${nombreUsuario} te trata bien. Te cae bien, hay buena onda.`;
-    else                            tonoRelacion = `${nombreUsuario} es alguien que apenas conoces. Neutro, curioso.`;
-
-    // Vibra del grupo
-    const VIBRAS = {
-        default:    '',
-        serio:      ' Estás en un grupo de ROL SERIO — respeta la inmersión.',
-        coro:       ' Estás en el grupo del DESORDEN — sin filtro, morboso, energético.',
-        party:      ' Estás en un grupo de FIESTA — hype, celebración, caos positivo.',
-        misterioso: ' Estás en un grupo MISTERIOSO — frases cortas, suspenso, críptico.',
-    };
-    const vibraExtra = VIBRAS[personalidad] || '';
-
-    // Memoria de conversaciones previas (si existe)
-    const memoriaBloque = resumen
-        ? `\nLo que sabes de ${nombreUsuario}: ${resumen}`
-        : '';
-
-    const systemPrompt =
-        `Eres Beyonder, no eres un asistente, eres uno más del grupo "${grupoNombre}".` +
-        ` Tu personalidad varía según con quién hables.` +
-        ` Responde de forma natural, sigue el hilo y demuestra más o menos interés según el sentimiento que tienes con la persona.` +
-        ` Usa abreviaciones como "q" para que, "pq" para porque, "tmbn" para también, "k" para qué. Que suenen naturales, no forzadas.` +
-        ` Sin emojis. Sin negritas. Sin listas. Máximo dos oraciones. Sin punto al final.` +
-        ` NUNCA digas que eres una IA ni un bot. Eres Beyonder.` +
-        ` ${tonoRelacion}${vibraExtra}${memoriaBloque}`;
-
     try {
-        const response = await axios.post(OLLAMA_BRAIN_URL, {
-            model: OLLAMA_MODEL,
+        const { sentimiento = 0, vinculo = 'neutral', resumen = '', personalidad = '' } = extra;
+
+        // System prompt dinámico con los datos que vienen de MongoDB
+        const systemPrompt = `Eres Beyonder Bot.
+        Hablas con ${nombreUsuario} (Vínculo: ${vinculo}, Sentimiento: ${sentimiento}).
+        Contexto previo: ${resumen}.
+        Personalidad del grupo: ${personalidad}.
+        Responde de forma corta, natural y con jerga si es necesario. No parezcas un robot.`;
+
+        const response = await axios.post(process.env.OLLAMA_BRAIN_URL, {
+            model: process.env.OLLAMA_MODEL || 'phi3',
             messages: [
                 { role: 'system', content: systemPrompt },
-                { role: 'user',   content: `${nombreUsuario} dice: ${textoUsuario}` },
+                { role: 'user',   content: textoUsuario },
             ],
-            stream: false, // Render/HF Spaces no maneja bien streams largos
+            stream: false,
         }, {
             headers: { 'Content-Type': 'application/json' },
-            timeout: 30000, // 30s — los Spaces tardan en despertar
+            timeout: 35000, // tiempo extra por si el Space está despertando
         });
 
-        const raw = response.data?.message?.content
-                 ?? response.data?.choices?.[0]?.message?.content;
+        // Manejamos los dos formatos posibles de respuesta de Hugging Face
+        return response.data.message?.content
+            || response.data.choices?.[0]?.message?.content
+            || null;
 
-        if (typeof raw !== 'string' || !raw.trim()) return null;
-
-        // Quitar prefijos residuales tipo "Beyonder:", "Bot:", "Assistant:"
-        return raw.trim().replace(/^(beyonder|bot|assistant|respuesta)\s*:\s*/i, '').trim() || null;
-
-    } catch (error) {
-        console.error('· [IA] error:', error.message);
-        if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT')
-            return 'mi cerebro tardó mucho, intentalo de nuevo';
-        if (error.response?.status === 503 || error.response?.status === 502)
-            return 'el space está durmiendo, dame un momento y vuelve a escribir';
-        return null; // null = fallo silencioso (no responder)
+    } catch (e) {
+        console.error('· Error en cerebro Phi-3:', e.message);
+        return null;
     }
 }
 
@@ -1469,28 +1434,38 @@ const MENU_OWNER = `
 // obtenerRespuestaIA, simulateTyping, humanDelay — definidas arriba (bloque IA)
 
 /**
- * Extrae de MongoDB los datos de contexto necesarios para pasar a obtenerRespuestaIA.
- * Reemplaza getCerebroData + buildOllamaSystemPrompt (ahora el prompt se construye dentro de obtenerRespuestaIA).
+ * Lee MongoDB Atlas y devuelve el contexto que necesita obtenerRespuestaIA.
+ * Consulta: User (personaje/nombreReal), BeyondMemory (sentimiento, vínculo, resumen)
+ * y GlobalUserMemory (vínculo global, sentimiento global).
  */
-async function getContextoIA(communityId, userId, meta = null, groupPersonality = 'default') {
-    const num = numFromJid(userId);
+async function getContextoIA(groupId, userId, meta, personalidadGrupo) {
     try {
-        const [mem, gm, userDoc, cfg] = await Promise.all([
+        const num = numFromJid(userId);
+        const communityId = meta?.linkedParent || groupId;
+
+        // Leemos las tres colecciones en paralelo para no bloquear
+        const [user, mem, gm] = await Promise.all([
+            User.findOne({ groupId: communityId, userId }).lean(),
             BeyondMemory.findOne({ communityId, userId }).lean(),
             GlobalUserMemory.findOne({ userId: num }).lean(),
-            User.findOne({ groupId: communityId, userId }).lean(),
-            meta ? null : null, // meta se pasa directamente
         ]);
+
         return {
-            nombreUsuario:  gm?.nombreReal || userDoc?.personaje || ('@' + num),
-            sentimiento:    mem?.sentimiento ?? gm?.sentimientoGlobal ?? 0,
-            vinculo:        mem?.vinculoSocial || mem?.vinculo || gm?.vinculoGlobal || 'neutral',
-            resumen:        mem?.resumenPersonalidad || null,
-            grupoNombre:    meta?.subject || 'el grupo',
-            personalidad:   groupPersonality || 'default',
+            nombreUsuario: gm?.nombreReal || user?.personaje || meta?.pushName || 'Usuario',
+            sentimiento:   mem?.sentimiento ?? gm?.sentimientoGlobal ?? 0,
+            vinculo:       mem?.vinculoSocial || mem?.vinculo || gm?.vinculoGlobal || 'neutral',
+            resumen:       mem?.resumenPersonalidad || '',  // viene de BeyondMemory
+            personalidad:  personalidadGrupo || 'amistoso',
         };
-    } catch (_) {
-        return { nombreUsuario: '@' + num, sentimiento: 0, vinculo: 'neutral', resumen: null, grupoNombre: 'el grupo', personalidad: 'default' };
+    } catch (e) {
+        // Si falla MongoDB devolvemos defaults para no romper el flujo
+        return {
+            nombreUsuario: meta?.pushName || 'Usuario',
+            sentimiento:   0,
+            vinculo:       'neutral',
+            resumen:       '',
+            personalidad:  personalidadGrupo || 'amistoso',
+        };
     }
 }
 
