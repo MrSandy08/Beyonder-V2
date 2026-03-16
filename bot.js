@@ -227,22 +227,15 @@ async function downloadViewOnce(message) {
 // BLOQUE SAFETY — clasificación con Space Gradio eeveebeyonder/antinsfw
 // ═══════════════════════════════════════════════════════════════════
 
+// Client de Gradio — se usa tanto para Anti-NSFW como para el cerebro Phi-3
+const { Client } = require('@gradio/client');
+
 // Nombre del Space de HuggingFace — configurable desde .env
 const ANTINSFW_SPACE = process.env.ANTINSFW_SPACE || 'eeveebeyonder/antinsfw';
 
-// Caché de la instancia del cliente Gradio (no reconectar en cada imagen)
-let _gradioClient = null;
-
-/**
- * Devuelve el cliente Gradio, conectándose la primera vez.
- * Si el Space está durmiendo (HF Free tier), Gradio lo despierta automáticamente.
- */
 async function getGradioClient() {
-    if (_gradioClient) return _gradioClient;
-    const { Client } = require('@gradio/client');
-    _gradioClient = await Client.connect(ANTINSFW_SPACE);
-    console.log(`· [Gradio] conectado a ${ANTINSFW_SPACE}`);
-    return _gradioClient;
+    // Conexión directa — sin caché para evitar clientes muertos tras reinicios del Space
+    return await Client.connect(ANTINSFW_SPACE);
 }
 
 /**
@@ -412,31 +405,26 @@ const OLLAMA_MODEL     = process.env.OLLAMA_MODEL || 'phi3';
  */
 async function obtenerRespuestaIA(textoUsuario, nombreUsuario, extra = {}) {
     try {
-        const { vinculo = 'neutral', resumen = '' } = extra;
+        const { vinculo = 'neutral', sentimiento = 0 } = extra;
 
-        // Formato /api/generate (Ollama nativo) con `prompt` en lugar de `messages`
-        // Muchos Spaces de Phi-3 en HF usan este endpoint
-        const promptCompleto =
-            `Instrucciones: Eres Beyonder Bot, un asistente natural.\n` +
-            `Contexto: Hablas con ${nombreUsuario}, vínculo ${vinculo}. ${resumen}\n` +
-            `Usuario: ${textoUsuario}\n` +
-            `Respuesta corta:`;
+        // Usamos @gradio/client igual que el Anti-NSFW — infalible con HuggingFace.
+        // Limpiamos la URL por si apunta a /api/chat o /api/generate en vez de al Space raíz.
+        const spaceUrl = (process.env.OLLAMA_BRAIN_URL || '')
+            .replace('/api/chat', '')
+            .replace('/api/generate', '');
 
-        const response = await axios.post(process.env.OLLAMA_BRAIN_URL, {
-            model: 'phi3',
-            prompt: promptCompleto,  // /api/generate usa prompt, no messages
-            stream: false,
-        }, { timeout: 35000 });
+        const client = await Client.connect(spaceUrl);
 
-        // /api/generate devuelve response.data.response
-        // /api/chat devuelve response.data.message.content — cubrimos ambos
-        return response.data.response
-            || response.data.message?.content
-            || null;
+        const prompt = `Eres Beyonder Bot. Hablas con ${nombreUsuario}. Vínculo: ${vinculo}. Sentimiento: ${sentimiento}. Responde corto y natural. Usuario dice: ${textoUsuario}`;
+
+        // Índice 0 = primera función del Space (el chat en Phi-3 de HF)
+        const result = await client.predict(0, [prompt]);
+
+        return result.data[0] || null;
 
     } catch (e) {
-        console.error('· Error en cerebro Phi-3:', e.message);
-        return null;
+        console.error('· Error crítico en cerebro Phi-3:', e.message);
+        return 'mi cerebro se desconectó un segundo, repíteme eso...';
     }
 }
 
