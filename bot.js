@@ -400,18 +400,41 @@ const OLLAMA_MODEL     = process.env.OLLAMA_MODEL || 'phi3';
  * @returns {Promise<string|null>}
  */
 async function obtenerRespuestaIA(textoUsuario, nombreUsuario, extra = {}) {
-    try {
-        const spaceID = process.env.OLLAMA_SPACE_ID || 'EeveeBeyonder/beyonder-brain';
-        const client  = await Client.connect(spaceID);
+    const spaceID = process.env.OLLAMA_SPACE_ID || 'EeveeBeyonder/beyonder-brain';
+    const spaceUrl = `https://huggingface.co/spaces/${spaceID}`;
 
-        const promptFinal = `Eres Beyonder Bot. Hablas con ${nombreUsuario}. Responde corto y natural.\n\nUsuario: ${textoUsuario}`;
-        const result = await client.predict(0, [promptFinal]);
-        return result.data[0] || null;
+    // ── Despertar el Space si está durmiendo (HF Free tier) ──────────
+    // "Could not resolve app config" = Space dormido. Un fetch al root
+    // lo despierta. Esperamos hasta 60s en intervalos de 5s.
+    const MAX_INTENTOS  = 6;
+    const ESPERA_MS     = 5000;
 
-    } catch (e) {
-        console.error('· Error crítico en cerebro Phi-3:', e.message);
-        return null;
+    for (let intento = 1; intento <= MAX_INTENTOS; intento++) {
+        try {
+            // Ping al Space para despertarlo
+            await axios.get(spaceUrl, { timeout: 10000 }).catch(() => {});
+
+            const client       = await Client.connect(spaceID);
+            const promptFinal  = `Eres Beyonder Bot. Hablas con ${nombreUsuario}. Responde corto y natural.\n\nUsuario: ${textoUsuario}`;
+            const result       = await client.predict(0, [promptFinal]);
+            return result.data[0] || null;
+
+        } catch (e) {
+            const dormido = e.message?.includes('app config')
+                         || e.message?.includes('503')
+                         || e.message?.includes('not running');
+
+            if (dormido && intento < MAX_INTENTOS) {
+                console.warn(`· [Phi-3] Space dormido, esperando ${ESPERA_MS/1000}s (intento ${intento}/${MAX_INTENTOS})...`);
+                await new Promise(r => setTimeout(r, ESPERA_MS));
+                continue;
+            }
+
+            console.error('· Error crítico en cerebro Phi-3:', e.message);
+            return null;
+        }
     }
+    return null;
 }
 
 async function simulateTyping(sock, jid) {
