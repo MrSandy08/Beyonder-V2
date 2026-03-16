@@ -5198,8 +5198,57 @@ if (body === '!risklist') {
     });
 }
 
-http.createServer((req, res) => res.end('beyonder ok')).listen(process.env.PORT || 3000, () => {
-    console.log(`· http :{${process.env.PORT || 3000}}`);
+// ══════════════════════════════════════════════════════════════════
+// SERVIDOR HTTP — Health check para Render / Railway / Fly.io
+// Render requiere que el proceso escuche en process.env.PORT o lo
+// marca como caído. Este servidor también expone el estado real del
+// bot para que puedas monitorearlo desde el dashboard.
+// ══════════════════════════════════════════════════════════════════
+
+const _startTime = Date.now();
+
+http.createServer(async (req, res) => {
+    // Solo atendemos GET / y GET /health — ignoramos el resto
+    if (req.method !== 'GET' || (req.url !== '/' && req.url !== '/health')) {
+        res.writeHead(404);
+        res.end('not found');
+        return;
+    }
+
+    // Estado de MongoDB
+    const dbStates = { 0: 'desconectado', 1: 'conectado', 2: 'conectando', 3: 'desconectando' };
+    const dbEstado = dbStates[mongoose.connection.readyState] || 'desconocido';
+    const dbOk     = mongoose.connection.readyState === 1;
+
+    // Estado del socket de WhatsApp
+    const waOk     = !!BOT_NUM; // BOT_NUM se llena cuando la conexión está abierta
+    const waEstado = waOk ? `conectado (${BOT_NUM})` : 'desconectado / reconectando';
+
+    // Uptime en formato legible
+    const uptimeMs  = Date.now() - _startTime;
+    const uptimeSeg = Math.floor(uptimeMs / 1000);
+    const horas     = Math.floor(uptimeSeg / 3600);
+    const minutos   = Math.floor((uptimeSeg % 3600) / 60);
+    const segundos  = uptimeSeg % 60;
+    const uptime    = `${horas}h ${minutos}m ${segundos}s`;
+
+    // Estado general: ok solo si ambos servicios están vivos
+    const todo_ok = dbOk && waOk;
+    const codigo  = todo_ok ? 200 : 503;
+
+    const payload = {
+        status:    todo_ok ? 'ok' : 'degradado',
+        bot:       waEstado,
+        database:  dbEstado,
+        uptime,
+        timestamp: new Date().toISOString(),
+    };
+
+    res.writeHead(codigo, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload, null, 2));
+
+}).listen(process.env.PORT || 3000, () => {
+    console.log(`· http health check en :${process.env.PORT || 3000}`);
 });
 
 startBot();
