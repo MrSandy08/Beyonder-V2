@@ -401,13 +401,11 @@ const OLLAMA_MODEL     = process.env.OLLAMA_MODEL || 'phi3';
  */
 async function obtenerRespuestaIA(textoUsuario, nombreUsuario, extra = {}) {
     try {
-        // Usamos el ID del Space directamente — más confiable que limpiar una URL
-        // Configurable desde .env con OLLAMA_SPACE_ID, o hardcoded como fallback
         const spaceID = process.env.OLLAMA_SPACE_ID || 'EeveeBeyonder/beyonder-brain';
         const client  = await Client.connect(spaceID);
 
-        const prompt = `Responde corto. Usuario: ${textoUsuario}`;
-        const result = await client.predict(0, [prompt]);
+        const promptFinal = `Eres Beyonder Bot. Hablas con ${nombreUsuario}. Responde corto y natural.\n\nUsuario: ${textoUsuario}`;
+        const result = await client.predict(0, [promptFinal]);
         return result.data[0] || null;
 
     } catch (e) {
