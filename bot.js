@@ -263,19 +263,14 @@ async function queryNudeNet(buffer) {
     try {
         const client = await getGradioClient();
 
-        // Convertir el Buffer a Blob para que Gradio lo acepte como imagen
-        const blob = new Blob([buffer], { type: 'image/jpeg' });
+        // Índice 0 = primera función del Space — estándar para cualquier Space de NudeNet.
+        // Más robusto que usar el nombre '/predict' porque no depende de cómo se llamó en app.py.
+        const result = await client.predict(0, [buffer]);
 
-        // Llamar al endpoint /predict del Space
-        const result = await client.predict('/predict', [blob]);
-
-        // result.data es lo que retorna app.py del Space
-        // Normalizamos lo que llegue a un formato consistente
-        const raw = result.data;
-        return normalizarRespuestaGradio(raw);
+        return normalizarRespuestaGradio(result.data);
 
     } catch (e) {
-        // Si el cliente está cacheado y el Space se cayó, limpiar para reconectar la próxima vez
+        // Si el cliente cacheado falló (Space reiniciado, etc.), forzar reconexión la próxima vez
         if (e.message?.includes('Space') || e.message?.includes('connect') || e.message?.includes('503')) {
             console.warn('· [Gradio] Space inaccesible, reconectando en próximo intento:', e.message);
             _gradioClient = null;
@@ -5199,56 +5194,36 @@ if (body === '!risklist') {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// SERVIDOR HTTP — Health check para Render / Railway / Fly.io
-// Render requiere que el proceso escuche en process.env.PORT o lo
-// marca como caído. Este servidor también expone el estado real del
-// bot para que puedas monitorearlo desde el dashboard.
+// SERVIDOR HTTP — Render necesita ver el puerto abierto ANTES de que
+// WhatsApp conecte o marca el deploy como fallido.
+// Escucha en 0.0.0.0 (todas las interfaces) — requisito de Render.
 // ══════════════════════════════════════════════════════════════════
 
+const PORT      = process.env.PORT || 3000;
 const _startTime = Date.now();
 
 http.createServer(async (req, res) => {
-    // Solo atendemos GET / y GET /health — ignoramos el resto
     if (req.method !== 'GET' || (req.url !== '/' && req.url !== '/health')) {
-        res.writeHead(404);
-        res.end('not found');
-        return;
+        res.writeHead(404); res.end('not found'); return;
     }
-
-    // Estado de MongoDB
-    const dbStates = { 0: 'desconectado', 1: 'conectado', 2: 'conectando', 3: 'desconectando' };
-    const dbEstado = dbStates[mongoose.connection.readyState] || 'desconocido';
+    const dbEstado = { 0:'desconectado', 1:'conectado', 2:'conectando', 3:'desconectando' }[mongoose.connection.readyState] || 'desconocido';
     const dbOk     = mongoose.connection.readyState === 1;
-
-    // Estado del socket de WhatsApp
-    const waOk     = !!BOT_NUM; // BOT_NUM se llena cuando la conexión está abierta
-    const waEstado = waOk ? `conectado (${BOT_NUM})` : 'desconectado / reconectando';
-
-    // Uptime en formato legible
-    const uptimeMs  = Date.now() - _startTime;
-    const uptimeSeg = Math.floor(uptimeMs / 1000);
-    const horas     = Math.floor(uptimeSeg / 3600);
-    const minutos   = Math.floor((uptimeSeg % 3600) / 60);
-    const segundos  = uptimeSeg % 60;
-    const uptime    = `${horas}h ${minutos}m ${segundos}s`;
-
-    // Estado general: ok solo si ambos servicios están vivos
-    const todo_ok = dbOk && waOk;
-    const codigo  = todo_ok ? 200 : 503;
-
-    const payload = {
-        status:    todo_ok ? 'ok' : 'degradado',
-        bot:       waEstado,
+    const waOk     = !!BOT_NUM;
+    const seg      = Math.floor((Date.now() - _startTime) / 1000);
+    const payload  = {
+        status:    (dbOk && waOk) ? 'ok' : 'degradado',
+        bot:       waOk ? `conectado (${BOT_NUM})` : 'desconectado / reconectando',
         database:  dbEstado,
-        uptime,
+        uptime:    `${Math.floor(seg/3600)}h ${Math.floor((seg%3600)/60)}m ${seg%60}s`,
         timestamp: new Date().toISOString(),
     };
-
-    res.writeHead(codigo, { 'Content-Type': 'application/json' });
+    res.writeHead((dbOk && waOk) ? 200 : 503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(payload, null, 2));
 
-}).listen(process.env.PORT || 3000, () => {
-    console.log(`· http health check en :${process.env.PORT || 3000}`);
+// 0.0.0.0 = escuchar en TODAS las interfaces (obligatorio en Render)
+}).listen(PORT, '0.0.0.0', () => {
+    console.log(`· Puerto ${PORT} abierto para Render`);
 });
 
+// WhatsApp conecta DESPUÉS del servidor HTTP — así Render ya vio el puerto
 startBot();
